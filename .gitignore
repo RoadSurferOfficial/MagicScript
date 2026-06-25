@@ -1,0 +1,6 @@
+# Block private channel authorization tokens
+token_*.json
+token.json
+
+# Block Google Cloud Console client secrets
+*.json
