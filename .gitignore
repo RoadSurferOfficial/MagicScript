@@ -4,3 +4,4 @@ token.json
 
 # Block Google Cloud Console client secrets
 *.json
+__pycache__
