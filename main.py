@@ -14,6 +14,8 @@ class PipelineControlPanel(QWidget):
         self.youtube_api = YouTubeAutomation()
         self.video_mapping = {}
         self.init_ui()
+        # Populate dropdown from cache on startup without hitting the API
+        self._load_videos_from_cache(self.channel_dropdown.currentText())
 
     def init_ui(self):
         self.setWindowTitle("Studio Production Pipeline")
@@ -63,13 +65,19 @@ class PipelineControlPanel(QWidget):
         picker_layout = QHBoxLayout()
         picker_layout.addWidget(QLabel("Select Video:"))
         self.video_dropdown = QComboBox()
-        self.video_dropdown.addItem("Click Refresh to load videos...")
         picker_layout.addWidget(self.video_dropdown, stretch=2)
 
         self.btn_refresh_yt = QPushButton("Refresh List")
         self.btn_refresh_yt.clicked.connect(self.populate_video_dropdown)
         picker_layout.addWidget(self.btn_refresh_yt)
         yt_section.addLayout(picker_layout)
+
+        # HDR Status Check
+        self.btn_hdr_check = QPushButton("Check HDR Status")
+        self.btn_hdr_check.setFixedHeight(38)
+        self.btn_hdr_check.setStyleSheet("background-color: #1a1a2e; color: #00ccff; font-weight: bold;")
+        self.btn_hdr_check.clicked.connect(self.handle_hdr_check)
+        yt_section.addWidget(self.btn_hdr_check)
 
         # Direct Push Button
         self.btn_push_yt = QPushButton("Publish Chapters Direct to YouTube Description")
@@ -100,17 +108,31 @@ class PipelineControlPanel(QWidget):
         self.status.setText(f"Saved: {name}_YouTube_Chapters.txt")
 
     def clear_video_dropdown_on_switch(self):
-        """Forces the video menu to reset when changing profiles so you don't cross-post accidentally"""
+        """On profile switch, load from disk cache if available, otherwise show placeholder"""
         self.video_dropdown.clear()
-        self.video_dropdown.addItem("Click Refresh to load videos...")
-        self.status.setText(f"Switched profile to: {self.channel_dropdown.currentText()}")
+        self.video_mapping.clear()
+        current_profile = self.channel_dropdown.currentText()
+        self._load_videos_from_cache(current_profile)
+
+    def _load_videos_from_cache(self, profile):
+        """Populate dropdown from disk cache without hitting the API"""
+        success, data = self.youtube_api.fetch_recent_videos(profile, force_refresh=False)
+        if success:
+            for video in data:
+                display_text = f"{video['title']} [{video['id']}]"
+                self.video_dropdown.addItem(display_text)
+                self.video_mapping[display_text] = video["id"]
+            self.status.setText(f"Loaded {profile} from cache.")
+        else:
+            self.video_dropdown.addItem("Click Refresh to load videos...")
+            self.status.setText(f"Switched profile to: {profile}")
 
     def populate_video_dropdown(self):
         """Fetches video list specific to the chosen active profile"""
         current_profile = self.channel_dropdown.currentText()
         self.status.setText(f"Connecting to {current_profile}...")
 
-        success, data = self.youtube_api.fetch_recent_videos(current_profile)
+        success, data = self.youtube_api.fetch_recent_videos(current_profile, force_refresh=True)
 
         if not success:
             self.status.setText(f"Error: {data}")
@@ -125,6 +147,24 @@ class PipelineControlPanel(QWidget):
             self.video_mapping[display_text] = video["id"]
 
         self.status.setText(f"Loaded {current_profile} uploads successfully!")
+
+    def handle_hdr_check(self):
+        current_selection = self.video_dropdown.currentText()
+        video_id = self.video_mapping.get(current_selection)
+
+        if not video_id:
+            self.status.setText("Error: Refresh and select a video first.")
+            return
+
+        self.status.setText(f"Checking HDR status for {video_id}...")
+        result = self.youtube_api.check_hdr_status(video_id)
+
+        if result["status"] == "error":
+            self.status.setText(f"HDR check error: {result['message']}")
+        elif result["hdr_active"]:
+            self.status.setText(f"✔ HDR confirmed: {result['profile']} — safe to publish.")
+        else:
+            self.status.setText("✖ No HDR streams found yet — still processing or SDR source.")
 
     def handle_youtube_push(self):
         current_profile = self.channel_dropdown.currentText()

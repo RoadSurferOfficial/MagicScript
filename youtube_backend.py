@@ -57,12 +57,45 @@ class YouTubeAutomation:
                 credentials = flow.run_local_server(port=0)
 
             with open(token_path, "w") as token:
-                token.write(credentials.to_authorized_user_file())
+                token.write(credentials.to_json())
 
         return googleapiclient.discovery.build("youtube", "v3", credentials=credentials)
 
-    def fetch_recent_videos(self, channel_profile):
-        """Fetches the 10 most recent videos from a specific channel profile"""
+    def _cache_path(self, channel_profile):
+        safe = channel_profile.replace(" ", "_")
+        return os.path.join(self.folder_path, f"cache_{safe}.json")
+
+    def _load_cache(self, channel_profile):
+        import json, time
+        path = self._cache_path(channel_profile)
+        if not os.path.exists(path):
+            return None
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if time.time() - data.get("timestamp", 0) > 86400:  # 24hr TTL
+                return None
+            return data["videos"]
+        except Exception:
+            return None
+
+    def _save_cache(self, channel_profile, video_list):
+        import json, time
+        path = self._cache_path(channel_profile)
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump({"timestamp": time.time(), "videos": video_list}, f)
+        except Exception:
+            pass  # cache write failure is non-fatal
+
+    def fetch_recent_videos(self, channel_profile, force_refresh=False):
+        """Fetches the 10 most recent videos from a specific channel profile.
+        Results are cached to disk per profile with a 24hr TTL.
+        Pass force_refresh=True (Refresh List button) to bypass the cache."""
+        if not force_refresh:
+            cached = self._load_cache(channel_profile)
+            if cached is not None:
+                return True, cached
         try:
             youtube = self.get_service(channel_profile)
             channel_request = youtube.channels().list(mine=True, part="contentDetails")
@@ -71,7 +104,7 @@ class YouTubeAutomation:
             if not channel_response.get("items"):
                 return False, "Could not find your YouTube channel."
 
-            uploads_playlist_id = channel_response["items"]["contentDetails"]["relatedPlaylists"]["uploads"]
+            uploads_playlist_id = channel_response["items"][0]["contentDetails"]["relatedPlaylists"]["uploads"]
 
             playlist_request = youtube.playlistItems().list(
                 part="snippet",
@@ -86,9 +119,66 @@ class YouTubeAutomation:
                 video_id = item["snippet"]["resourceId"]["videoId"]
                 video_list.append({"title": title, "id": video_id})
 
+            self._save_cache(channel_profile, video_list)
             return True, video_list
         except Exception as e:
-            return False, f"Failed to fetch videos: {str(e)}"
+            import traceback
+            return False, f"Failed to fetch videos: {traceback.format_exc()}"
+
+    def check_hdr_status(self, video_id):
+        """
+        Uses yt-dlp to check whether HDR streams are present for a video.
+        Passes --cookies-from-browser firefox to handle private/unlisted videos.
+        Returns a dict: {status, hdr_active, profile, message}
+        """
+        import subprocess, json
+
+        url = f"https://www.youtube.com/watch?v={video_id}"
+        cmd = [
+            "yt-dlp",
+            "--dump-json",
+            "--no-update",
+            "--quiet",
+            "--cookies-from-browser", "firefox",
+            url
+        ]
+
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+
+            # Private or unavailable video
+            if "Private video" in result.stderr or "Sign in" in result.stderr:
+                return {"status": "error", "hdr_active": False, "profile": None,
+                        "message": "Private/unlisted video — authentication may have failed"}
+
+            if not result.stdout.strip():
+                err = result.stderr.strip().splitlines()[-1] if result.stderr.strip() else "No output from yt-dlp"
+                return {"status": "error", "hdr_active": False, "profile": None,
+                        "message": err}
+
+            data = json.loads(result.stdout)
+            dynamic_ranges = [
+                f.get("dynamic_range", "")
+                for f in data.get("formats", [])
+                if f.get("dynamic_range")
+            ]
+
+            hdr_profiles = [r for r in dynamic_ranges if r not in ("SDR", "")]
+            if hdr_profiles:
+                profile = hdr_profiles[0]  # e.g. 'HDR10', 'HLG'
+                return {"status": "success", "hdr_active": True, "profile": profile,
+                        "message": None}
+
+            return {"status": "success", "hdr_active": False, "profile": "SDR",
+                    "message": None}
+
+        except subprocess.TimeoutExpired:
+            return {"status": "error", "hdr_active": False, "profile": None,
+                    "message": "yt-dlp timed out after 30s"}
+        except Exception as e:
+            import traceback
+            return {"status": "error", "hdr_active": False, "profile": None,
+                    "message": traceback.format_exc()}
 
     def update_description(self, video_id, new_content, channel_profile):
         """Prepends new text content to the description of a specific channel profile"""
@@ -100,7 +190,7 @@ class YouTubeAutomation:
             if not response["items"]:
                 return False, f"Video ID '{video_id}' not found."
 
-            video_item = response["items"]
+            video_item = response["items"][0]
             snippet = video_item["snippet"]
 
             old_desc = snippet.get("description", "")
