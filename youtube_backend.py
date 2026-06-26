@@ -137,9 +137,13 @@ class YouTubeAutomation:
         cmd = [
             "yt-dlp",
             "--dump-json",
-            "--no-update",
+            "--skip-download",
+            "--no-playlist",
             "--quiet",
+            "--js-runtimes", "node",
+            "--remote-components", "ejs:github",
             "--cookies-from-browser", "firefox",
+            "--no-update",
             url
         ]
 
