@@ -56,7 +56,7 @@ class PipelineControlPanel(QWidget):
         channel_layout.addWidget(QLabel("Active Channel Profile:"))
         self.channel_dropdown = QComboBox()
         # Add your channel nicknames here to easily switch between profiles
-        self.channel_dropdown.addItems(["Channel A", "Channel B", "Channel C"])
+        self.channel_dropdown.addItems(["RoadSurfer", "Chaotic Good", "Chaotic Neutral", "Chaotic Evil"])
         self.channel_dropdown.currentIndexChanged.connect(self.clear_video_dropdown_on_switch)
         channel_layout.addWidget(self.channel_dropdown, stretch=2)
         yt_section.addLayout(channel_layout)
