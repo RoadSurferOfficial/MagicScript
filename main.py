@@ -1,11 +1,35 @@
 #!/usr/bin/env python3
 import sys
 import os
-from PySide6.QtWidgets import QApplication, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QComboBox
-from PySide6.QtCore import Qt
+from PySide6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout,
+                                QPushButton, QLabel, QComboBox, QProgressBar, QFileDialog)
+from PySide6.QtCore import Qt, QThread, Signal
 
 from resolve_backend import ResolveAutomation
 from youtube_backend import YouTubeAutomation
+
+class UploadWorker(QThread):
+    progress = Signal(float)
+    finished = Signal(bool, str)
+
+    def __init__(self, youtube_api, file_path, title, description, channel_profile):
+        super().__init__()
+        self.youtube_api = youtube_api
+        self.file_path = file_path
+        self.title = title
+        self.description = description
+        self.channel_profile = channel_profile
+
+    def run(self):
+        success, result = self.youtube_api.resumable_upload(
+            file_path=self.file_path,
+            title=self.title,
+            description=self.description,
+            channel_profile=self.channel_profile,
+            progress_callback=lambda p: self.progress.emit(p)
+        )
+        self.finished.emit(success, result)
+
 
 class PipelineControlPanel(QWidget):
     def __init__(self):
@@ -71,6 +95,26 @@ class PipelineControlPanel(QWidget):
         self.btn_refresh_yt.clicked.connect(self.populate_video_dropdown)
         picker_layout.addWidget(self.btn_refresh_yt)
         yt_section.addLayout(picker_layout)
+
+        # Upload Button
+        self.btn_upload = QPushButton("⬆  Upload Video to YouTube")
+        self.btn_upload.setFixedHeight(38)
+        self.btn_upload.setStyleSheet("background-color: #1a2e1a; color: #00ff88; font-weight: bold;")
+        self.btn_upload.clicked.connect(self.handle_upload)
+        yt_section.addWidget(self.btn_upload)
+
+        # Upload Progress Bar
+        self.upload_progress = QProgressBar()
+        self.upload_progress.setRange(0, 100)
+        self.upload_progress.setValue(0)
+        self.upload_progress.setFixedHeight(16)
+        self.upload_progress.setTextVisible(True)
+        self.upload_progress.setStyleSheet("""
+            QProgressBar { border: 1px solid #333; border-radius: 3px; background: #111; color: white; font-size: 10px; }
+            QProgressBar::chunk { background: #00ff88; border-radius: 2px; }
+        """)
+        self.upload_progress.setVisible(False)
+        yt_section.addWidget(self.upload_progress)
 
         # HDR Status Check
         self.btn_hdr_check = QPushButton("Check HDR Status")
@@ -147,6 +191,45 @@ class PipelineControlPanel(QWidget):
             self.video_mapping[display_text] = video["id"]
 
         self.status.setText(f"Loaded {current_profile} uploads successfully!")
+
+    def handle_upload(self):
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Select Video File", os.path.expanduser("~"),
+            "Video Files (*.mp4 *.mkv *.mov *.avi *.webm);;All Files (*)"
+        )
+        if not file_path:
+            return
+
+        title = os.path.splitext(os.path.basename(file_path))[0]
+        channel_profile = self.channel_dropdown.currentText()
+
+        self.btn_upload.setEnabled(False)
+        self.upload_progress.setValue(0)
+        self.upload_progress.setVisible(True)
+        self.status.setText(f"Starting upload to {channel_profile}...")
+
+        self._upload_worker = UploadWorker(
+            youtube_api=self.youtube_api,
+            file_path=file_path,
+            title=title,
+            description="",
+            channel_profile=channel_profile
+        )
+        self._upload_worker.progress.connect(self._on_upload_progress)
+        self._upload_worker.finished.connect(self._on_upload_finished)
+        self._upload_worker.start()
+
+    def _on_upload_progress(self, percent):
+        self.upload_progress.setValue(int(percent * 100))
+        self.status.setText(f"Uploading... {int(percent * 100)}%")
+
+    def _on_upload_finished(self, success, result):
+        self.btn_upload.setEnabled(True)
+        self.upload_progress.setVisible(False)
+        if success:
+            self.status.setText(f"✔ Upload complete! Video ID: {result}")
+        else:
+            self.status.setText(f"✖ Upload failed: {result}")
 
     def handle_hdr_check(self):
         current_selection = self.video_dropdown.currentText()

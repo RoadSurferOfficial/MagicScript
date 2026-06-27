@@ -184,6 +184,154 @@ class YouTubeAutomation:
             return {"status": "error", "hdr_active": False, "profile": None,
                     "message": traceback.format_exc()}
 
+    def resumable_upload(self, file_path, title, description, channel_profile, progress_callback=None):
+        """
+        Uploads a video file to YouTube using the channel profile's existing auth.
+        Saves session to disk immediately after handshake — survives crashes and reboots.
+        progress_callback(percent: float) is called each chunk if provided.
+        Returns (True, video_id) or (False, error_message).
+        """
+        import json as _json
+        import mimetypes
+        import time
+        import httplib2
+        import requests as _requests
+        from googleapiclient.http import MediaFileUpload
+        from googleapiclient.errors import HttpError
+        from google.auth.transport.requests import Request as GoogleRequest
+
+        file_path = os.path.abspath(file_path)
+        safe_profile = channel_profile.replace(" ", "_")
+        session_file = os.path.join(self.folder_path, f"upload_session_{safe_profile}.json")
+
+        mime_type, _ = mimetypes.guess_type(file_path)
+        if not mime_type:
+            mime_type = 'application/octet-stream'
+        total_size = os.path.getsize(file_path)
+
+        # ── Session helpers ────────────────────────────────────────────────────
+        def save_session(upload_url):
+            with open(session_file, 'w') as f:
+                _json.dump({'upload_url': upload_url, 'file_path': file_path}, f)
+
+        def load_session():
+            if not os.path.exists(session_file):
+                return None
+            try:
+                with open(session_file, 'r') as f:
+                    return _json.load(f)
+            except Exception:
+                return None
+
+        def clear_session():
+            if os.path.exists(session_file):
+                os.remove(session_file)
+
+        def get_server_progress(upload_url):
+            try:
+                resp = _requests.put(
+                    upload_url,
+                    headers={'Content-Range': 'bytes */*', 'Content-Length': '0'},
+                    allow_redirects=False
+                )
+                if resp.status_code == 308:
+                    rng = resp.headers.get('Range', '')
+                    return int(rng.split('-')[-1]) + 1 if rng else 0
+                elif resp.status_code in (200, 201):
+                    return -1  # already complete
+            except Exception:
+                pass
+            return 0
+
+        # ── Determine start state ──────────────────────────────────────────────
+        start_bytes = 0
+        upload_url = None
+        session = load_session()
+
+        if session and session.get('file_path') == file_path:
+            start_bytes = get_server_progress(session['upload_url'])
+            if start_bytes == -1:
+                clear_session()
+                return False, "Upload was already completed previously."
+            upload_url = session['upload_url']
+
+        # ── Get authenticated youtube service ──────────────────────────────────
+        try:
+            youtube = self.get_service(channel_profile)
+        except Exception as e:
+            return False, f"Auth failed: {e}"
+
+        # ── Build media ────────────────────────────────────────────────────────
+        media = MediaFileUpload(file_path, mimetype=mime_type, resumable=True, chunksize=4 * 1024 * 1024)
+
+        # ── New upload: POST handshake to get session URL before data moves ────
+        if upload_url is None:
+            body = {
+                'snippet': {'title': title, 'description': description, 'categoryId': '22'},
+                'status': {'privacyStatus': 'private'}
+            }
+            credentials = youtube._http.credentials
+            if not credentials.valid:
+                credentials.refresh(GoogleRequest())
+
+            resp = _requests.post(
+                'https://www.googleapis.com/upload/youtube/v3/videos?uploadType=resumable&part=snippet,status',
+                headers={
+                    'Authorization': f'Bearer {credentials.token}',
+                    'Content-Type': 'application/json; charset=UTF-8',
+                    'X-Upload-Content-Type': mime_type,
+                    'X-Upload-Content-Length': str(total_size),
+                },
+                data=_json.dumps(body).encode('utf-8')
+            )
+            if resp.status_code not in (200, 201):
+                return False, f"Failed to initiate upload: HTTP {resp.status_code} — {resp.text}"
+            upload_url = resp.headers['Location']
+            save_session(upload_url)
+
+        # ── Point request at session URL ───────────────────────────────────────
+        request = youtube.videos().insert(part='snippet,status', body={}, media_body=media)
+        request.resumable_uri = upload_url
+
+        if start_bytes > 0:
+            media._fd = open(file_path, 'rb')
+            media._fd.seek(start_bytes)
+            request.resumable_progress = start_bytes
+
+        if progress_callback:
+            progress_callback(start_bytes / total_size if total_size > 0 else 0.0)
+
+        # ── Chunk loop ─────────────────────────────────────────────────────────
+        response = None
+        retry = 0
+        max_retries = 8
+
+        while response is None:
+            try:
+                status, response = request.next_chunk()
+                if status:
+                    sent = start_bytes + status.resumable_progress
+                    if progress_callback:
+                        progress_callback(min(sent / total_size, 1.0))
+
+            except HttpError as e:
+                if e.resp.status in (500, 502, 503, 504, 408):
+                    retry += 1
+                    if retry > max_retries:
+                        return False, f"Upload failed after {max_retries} retries."
+                    time.sleep(2 ** retry)
+                else:
+                    return False, f"HTTP error during upload: {e}"
+
+            except (httplib2.HttpLib2Error, IOError) as e:
+                return False, f"Upload interrupted — rerun to resume. ({e})"
+
+        if progress_callback:
+            progress_callback(1.0)
+
+        clear_session()
+        return True, response['id']
+
     def update_description(self, video_id, new_content, channel_profile):
         """Prepends new text content to the description of a specific channel profile"""
         try:
