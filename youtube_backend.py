@@ -332,8 +332,117 @@ class YouTubeAutomation:
         clear_session()
         return True, response['id']
 
-    def update_description(self, video_id, new_content, channel_profile):
-        """Prepends new text content to the description of a specific channel profile"""
+    def publish_now(self, video_id, channel_profile, publish_time_file=None):
+        """
+        Sets a video's privacy to public, optionally scheduled via publishtime.txt.
+        File format: a single ISO 8601 line e.g. '2026-06-28T20:30:00Z'
+        Returns (True, message) or (False, error).
+        """
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        publish_at = None
+        file_missing = False
+
+        if publish_time_file and os.path.exists(publish_time_file):
+            try:
+                with open(publish_time_file, "r", encoding="utf-8") as f:
+                    raw = f.read().strip()
+                # Parse and normalize to UTC ISO 8601
+                dt = datetime.fromisoformat(raw)
+                if dt.tzinfo is None:
+                    # Assume local time if no tz given
+                    dt = dt.astimezone()
+                publish_at = dt.astimezone(ZoneInfo("UTC")).strftime("%Y-%m-%dT%H:%M:%SZ")
+            except Exception as e:
+                return False, f"Failed to parse publishtime.txt: {e}"
+        else:
+            file_missing = True
+
+        try:
+            youtube = self.get_service(channel_profile)
+
+            if publish_at:
+                status_body = {
+                    "privacyStatus": "private",
+                    "publishAt": publish_at
+                }
+                human_time = datetime.fromisoformat(publish_at).astimezone().strftime("%Y-%m-%d %I:%M %p %Z")
+                message = f"✔ Scheduled to publish at {human_time}"
+            else:
+                status_body = {"privacyStatus": "public"}
+                message = "✔ Published now (no publishtime.txt found)"
+
+            youtube.videos().update(
+                part="status",
+                body={"id": video_id, "status": status_body}
+            ).execute()
+
+            return True, message
+
+        except googleapiclient.errors.HttpError as e:
+            return False, f"API error: {e.reason}"
+        except Exception as e:
+            return False, f"Publish failed: {e}"
+
+    def upload_subtitle(self, video_id, srt_path, channel_profile, language="en"):
+        """Uploads an SRT file as captions to a YouTube video."""
+        try:
+            from googleapiclient.http import MediaFileUpload
+            youtube = self.get_service(channel_profile)
+            media = MediaFileUpload(srt_path, mimetype="application/octet-stream", resumable=False)
+            youtube.captions().insert(
+                part="snippet",
+                body={
+                    "snippet": {
+                        "videoId": video_id,
+                        "language": language,
+                        "name": "",
+                        "isDraft": False
+                    }
+                },
+                media_body=media
+            ).execute()
+            return True, f"✔ Subtitles uploaded from {os.path.basename(srt_path)}"
+        except googleapiclient.errors.HttpError as e:
+            return False, f"API error uploading subtitles: {e.reason}"
+        except Exception as e:
+            return False, f"Subtitle upload failed: {e}"
+
+    def upload_thumbnail(self, video_id, image_path, channel_profile):
+        """Uploads a thumbnail image to a YouTube video."""
+        try:
+            from googleapiclient.http import MediaFileUpload
+            import mimetypes
+            mime, _ = mimetypes.guess_type(image_path)
+            if not mime:
+                mime = "image/jpeg"
+            youtube = self.get_service(channel_profile)
+            media = MediaFileUpload(image_path, mimetype=mime, resumable=False)
+            youtube.thumbnails().set(
+                videoId=video_id,
+                media_body=media
+            ).execute()
+            return True, f"✔ Thumbnail uploaded: {os.path.basename(image_path)}"
+        except googleapiclient.errors.HttpError as e:
+            return False, f"API error uploading thumbnail: {e.reason}"
+        except Exception as e:
+            return False, f"Thumbnail upload failed: {e}"
+
+    def fetch_video_by_id(self, video_id, channel_profile):
+        """Fetches a single video's title by ID via the API. Used for autodetect probe."""
+        try:
+            youtube = self.get_service(channel_profile)
+            response = youtube.videos().list(part="snippet", id=video_id).execute()
+            if not response.get("items"):
+                return False, None
+            title = response["items"][0]["snippet"]["title"]
+            return True, {"title": title, "id": video_id}
+        except Exception as e:
+            return False, str(e)
+
+    def update_description(self, video_id, new_content, channel_profile, tags=None):
+        """Replaces the description and optionally updates tags for a video."""
         try:
             youtube = self.get_service(channel_profile)
             request = youtube.videos().list(part="snippet", id=video_id)
@@ -342,19 +451,17 @@ class YouTubeAutomation:
             if not response["items"]:
                 return False, f"Video ID '{video_id}' not found."
 
-            video_item = response["items"][0]
-            snippet = video_item["snippet"]
+            snippet = response["items"][0]["snippet"]
+            snippet["description"] = new_content
+            if tags is not None:
+                snippet["tags"] = tags
 
-            old_desc = snippet.get("description", "")
-            snippet["description"] = f"{new_content}\n\n---\n\n{old_desc}"
-
-            update_request = youtube.videos().update(
+            youtube.videos().update(
                 part="snippet",
                 body={"id": video_id, "snippet": snippet}
-            )
-            update_request.execute()
-            return True, "YouTube description updated successfully!"
+            ).execute()
+            return True, "✔ YouTube description and tags updated successfully."
         except googleapiclient.errors.HttpError as e:
             return False, f"Google API Error: {e.reason}"
         except Exception as e:
-            return False, f"Unexpected connection error: {str(e)}"
+            return False, f"Unexpected error: {str(e)}"
