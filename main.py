@@ -221,7 +221,7 @@ class PipelineControlPanel(QWidget):
         os.makedirs(youtube_dir, exist_ok=True)
 
         # Create stub helper files if missing
-        for fname in ["DescriptionHead.txt", "DescriptionFoot.txt", "Tags.txt"]:
+        for fname in ["DescriptionHead.txt", "DescriptionFoot.txt", "Tags.txt", "Title.txt"]:
             fpath = os.path.join(youtube_dir, fname)
             if not os.path.exists(fpath):
                 open(fpath, "w", encoding="utf-8").close()
@@ -284,6 +284,7 @@ class PipelineControlPanel(QWidget):
         chapters = open(chapters_path, "r", encoding="utf-8").read().strip()
         foot = read_file("DescriptionFoot.txt")
         tags_raw = read_file("Tags.txt")
+        title = read_file("Title.txt")
 
         # Concatenate description parts, skipping empty sections
         parts = [p for p in [head, chapters, foot] if p]
@@ -293,7 +294,9 @@ class PipelineControlPanel(QWidget):
         tags = [t.strip() for t in re.split(r"[,\n]", tags_raw) if t.strip()] if tags_raw else []
 
         self.status.setText(f"Updating {current_profile} description and tags...")
-        success, message = self.youtube_api.update_description(video_id, description, current_profile, tags)
+        success, message = self.youtube_api.update_description(
+            video_id, description, current_profile, tags, title=title or None
+        )
         self.status.setText(message)
 
     def clear_video_dropdown_on_switch(self):

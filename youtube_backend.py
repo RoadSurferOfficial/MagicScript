@@ -441,8 +441,8 @@ class YouTubeAutomation:
         except Exception as e:
             return False, str(e)
 
-    def update_description(self, video_id, new_content, channel_profile, tags=None):
-        """Replaces the description and optionally updates tags for a video."""
+    def update_description(self, video_id, new_content, channel_profile, tags=None, title=None):
+        """Replaces the description, optionally updates tags and title for a video."""
         try:
             youtube = self.get_service(channel_profile)
             request = youtube.videos().list(part="snippet", id=video_id)
@@ -455,12 +455,14 @@ class YouTubeAutomation:
             snippet["description"] = new_content
             if tags is not None:
                 snippet["tags"] = tags
+            if title:
+                snippet["title"] = title
 
             youtube.videos().update(
                 part="snippet",
                 body={"id": video_id, "snippet": snippet}
             ).execute()
-            return True, "✔ YouTube description and tags updated successfully."
+            return True, "✔ YouTube title, description and tags updated successfully."
         except googleapiclient.errors.HttpError as e:
             return False, f"Google API Error: {e.reason}"
         except Exception as e:
